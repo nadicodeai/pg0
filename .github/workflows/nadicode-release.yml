@@ -31,4 +31,4 @@ jobs:
           gh release create "${{ github.ref_name }}" dist/* \
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
-            --notes "pg0-embedded 0.15.2 with OpenSSL bundled in the macOS PostgreSQL build, so it starts on a Mac without Homebrew (fix/macos-portable-openssl)."
+            --notes "pg0-embedded 0.15.2 with OpenSSL bundled in the macOS PostgreSQL build, so it starts on a Mac without Homebrew (fix/macos-portable-openssl), and pg0.exe and the Windows PostgreSQL build carrying the Visual C++ runtime, so they start on a Windows without it (fix/windows-vc-runtime)."
