@@ -104,6 +104,7 @@ fn bundle_postgresql(pg_version: &str, versions: &HashMap<String, String>, out_d
         "aarch64-apple-darwin" | "x86_64-apple-darwin" => {
             bundle_macos_openssl(&bundle_path, versions, out_dir)
         }
+        "x86_64-pc-windows-msvc" => bundle_windows_vc_runtime(&bundle_path, out_dir),
         _ => bundle_path,
     };
 
@@ -541,6 +542,134 @@ fn bundle_macos_openssl(
         portable.display()
     );
     portable
+}
+
+/// The Visual C++ runtime DLLs the theseus-rs Windows binaries import.
+const WINDOWS_VC_RUNTIME: [&str; 3] = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"];
+
+/// Make the theseus-rs Windows PostgreSQL bundle self-contained.
+///
+/// The theseus-rs Windows binaries (initdb, pg_ctl, postgres, libpq, the
+/// contrib DLLs, ...) are built with MSVC and load the Visual C++ runtime from
+/// the system, which a Windows without the Visual C++ Redistributable does not
+/// carry, so PostgreSQL fails to start there with STATUS_DLL_NOT_FOUND.
+///
+/// We do Microsoft's app-local deployment: the runtime DLLs go into the
+/// bundle's `bin/`, where Windows looks first for the executables beside them,
+/// and the extension DLLs postgres loads from `lib/` use the copies postgres
+/// already loaded. The DLLs come from the building machine's Visual Studio
+/// redistributable folder (`windows_vc_redist_dir`).
+///
+/// Returns the path of the repacked bundle.
+fn bundle_windows_vc_runtime(upstream_bundle: &Path, out_dir: &Path) -> PathBuf {
+    let stem = upstream_bundle
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_suffix(".zip"))
+        .expect("PostgreSQL bundle name must end in .zip");
+    let portable = out_dir.join(format!("{}-vcruntime.zip", stem));
+    if portable.exists() {
+        eprintln!(
+            "Using cached portable PostgreSQL bundle: {}",
+            portable.display()
+        );
+        return portable;
+    }
+
+    let redist = windows_vc_redist_dir();
+    let mut upstream =
+        zip::ZipArchive::new(File::open(upstream_bundle).expect("open PostgreSQL bundle"))
+            .expect("Failed to read PostgreSQL bundle");
+    let root = upstream
+        .by_index_raw(0)
+        .expect("PostgreSQL bundle is empty")
+        .name()
+        .split('/')
+        .next()
+        .expect("PostgreSQL bundle entry has no name")
+        .to_string();
+
+    let tmp = out_dir.join(format!(
+        "{}.partial",
+        portable.file_name().unwrap().to_str().unwrap()
+    ));
+    {
+        let mut writer =
+            zip::ZipWriter::new(File::create(&tmp).expect("create portable bundle"));
+        for i in 0..upstream.len() {
+            let entry = upstream
+                .by_index_raw(i)
+                .expect("Failed to read PostgreSQL bundle entry");
+            writer
+                .raw_copy_file(entry)
+                .expect("Failed to repack PostgreSQL bundle");
+        }
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for dll in WINDOWS_VC_RUNTIME {
+            let bytes = fs::read(redist.join(dll))
+                .unwrap_or_else(|e| panic!("Failed to read {} from {}: {}", dll, redist.display(), e));
+            writer
+                .start_file(format!("{}/bin/{}", root, dll), options)
+                .expect("Failed to add the Visual C++ runtime");
+            writer
+                .write_all(&bytes)
+                .expect("Failed to add the Visual C++ runtime");
+        }
+        writer.finish().expect("Failed to write portable bundle");
+    }
+    fs::rename(&tmp, &portable).expect("Failed to move portable bundle into place");
+    eprintln!(
+        "Bundled the Visual C++ runtime from {} into {}",
+        redist.display(),
+        portable.display()
+    );
+    portable
+}
+
+/// The x64 Visual C++ runtime folder of the building machine's Visual Studio:
+/// `PG0_VC_REDIST_DIR` when set, otherwise the `Microsoft.VC*.CRT` folder of
+/// the redistributable version the newest Visual Studio with the C++ tools
+/// names as its default, found with vswhere.
+fn windows_vc_redist_dir() -> PathBuf {
+    println!("cargo:rerun-if-env-changed=PG0_VC_REDIST_DIR");
+    if let Ok(dir) = env::var("PG0_VC_REDIST_DIR") {
+        return PathBuf::from(dir);
+    }
+    let program_files =
+        env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".to_string());
+    let vswhere = Path::new(&program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    let output = std::process::Command::new(&vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {}", vswhere.display(), e));
+    let install = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let version = fs::read_to_string(
+        install.join(r"VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt"),
+    )
+    .expect("Failed to read the Visual C++ redistributable version");
+    let x64 = install
+        .join(r"VC\Redist\MSVC")
+        .join(version.trim())
+        .join("x64");
+    fs::read_dir(&x64)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", x64.display(), e))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name.starts_with("Microsoft.VC") && name.ends_with(".CRT"))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("No Microsoft.VC*.CRT folder in {}", x64.display()))
 }
 
 /// Read `wanted` from the zstd tar member whose name starts with `member`

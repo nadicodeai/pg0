@@ -1,0 +1,4 @@
+# pg0.exe links the C runtime statically, so it starts on a Windows without
+# the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

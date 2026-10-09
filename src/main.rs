@@ -496,6 +496,10 @@ fn extract_bundled_postgresql(installation_dir: &PathBuf, pg_version: &str) -> R
     // re-extract over it so the bundled OpenSSL replaces those binaries.
     #[cfg(target_os = "macos")]
     let already_extracted = already_extracted && version_dir.join("lib/libcrypto.3.dylib").exists();
+    // Earlier Windows builds shipped a bundle that loads the Visual C++ runtime
+    // from the system; re-extract over it so the bundled runtime is beside it.
+    #[cfg(windows)]
+    let already_extracted = already_extracted && bin_dir.join("vcruntime140.dll").exists();
 
     if !already_extracted {
         if POSTGRESQL_BUNDLE.is_empty() {
